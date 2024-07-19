@@ -1,0 +1,92 @@
+import firebase_admin
+from firebase_admin import credentials, firestore
+import urllib.request
+from flask import Flask, request, jsonify
+from Crypto.Cipher import AES
+import base64
+
+# Initialize Firebase
+cred = credentials.Certificate("")
+firebase_admin.initialize_app(cred, {''})
+db = firestore.client()
+
+# Encryption key 
+encryption_key = b'Sixteen byte key'
+
+def encrypt_data(data, key):
+    cipher = AES.new(key, AES.MODE_EAX)
+    nonce = cipher.nonce
+    ciphertext, tag = cipher.encrypt_and_digest(data.encode('utf-8'))
+    return base64.b64encode(nonce + ciphertext).decode('utf-8')
+
+def decrypt_data(encrypted_data, key):
+    decoded_data = base64.b64decode(encrypted_data)
+    nonce = decoded_data[:16]
+    ciphertext = decoded_data[16:]
+    cipher = AES.new(key, AES.MODE_EAX, nonce=nonce)
+    plaintext = cipher.decrypt(ciphertext)
+    return plaintext.decode('utf-8')
+
+class FirebaseImageLoader:
+    def __init__(self):
+        self.db = firestore.client()
+
+    def get_image_by_id(self, doc_id, collection, is_dependent=False):
+        images_ref = self.db.collection(collection)
+        user_doc = images_ref.document(doc_id).get()
+
+        if user_doc.exists:
+            image_url_field = None
+            if collection == 'Fan' and not is_dependent:
+                image_url_field = 'fanImageURL'
+            elif collection == 'Family_Members' and is_dependent:
+                image_url_field = 'depImageURL'
+            else:
+                print(f"Invalid collection or ID type: {collection}, is_dependent: {is_dependent}")
+                return None
+            
+            fan_image_url = user_doc.to_dict().get(image_url_field)
+            if fan_image_url:
+                try:
+                    with urllib.request.urlopen(fan_image_url) as response:
+                        image_data = response.read()
+                    return image_data
+                except Exception as e:
+                    print(f"Error fetching image from URL: {e}")
+                    return None
+            else:
+                print(f"No {image_url_field} found for document ID: {doc_id}")
+                return None
+        else:
+            print(f"No document found for ID: {doc_id} in collection: {collection}")
+            return None
+
+def get_user_and_dependent_id_from_ticketsto(match_doc_id):
+    match_ref = db.collection('Match_Tickets').document(match_doc_id)
+    match_doc = match_ref.get()
+    if match_doc.exists:
+        ticketsto = match_doc.get('TicketsTo')
+        if ticketsto:
+            user_id = ticketsto[0] if len(ticketsto) >= 1 else None
+            dep_ids = ticketsto[1:] if len(ticketsto) > 1 else []
+            return user_id, dep_ids
+    return None, []
+
+app = Flask(__name__)
+
+@app.route('/scan_qr', methods=['POST'])
+def process_qr():
+    encrypted_match_doc_id = request.json.get('match_doc_id')
+    match_doc_id = decrypt_data(encrypted_match_doc_id, encryption_key)
+    user_id, dep_ids = get_user_and_dependent_id_from_ticketsto(match_doc_id)
+    if user_id or dep_ids:
+        return jsonify({'user_id': user_id, 'dep_ids': dep_ids}), 200
+    else:
+        return jsonify({'error': 'Failed to fetch user and dependent IDs'}), 400
+
+@app.route('/get_recognition_result', methods=['GET'])
+def get_recognition_result():
+    return jsonify({'status': 'result not implemented on laptop'}), 200
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
